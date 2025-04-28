@@ -1,65 +1,131 @@
 #include "generator.h"
 #include "lp_utils.h"
 #include "annealing.h"
+#include "utils.h"
 #include <iostream>
 #include <random>
-#include <cmath>
 #include <fstream>
+#include <cmath>
+#include <omp.h>
 
-int main() {
-    int n = 10, k = 5, m = 5;
-    int nk = n - k;
+void local_optimize(MatrixI &P, int m){
+    bool improved=true;
+    while(improved){
+      improved=false;
+      auto G = construct_generator_matrix(P);
+      double base = compute_m_height(G,m,false);
+      // try flipping each entry by ±1
+      for(size_t i=0;i<P.size();++i) for(size_t j=0;j<P[0].size();++j){
+        for(int d : {+1,-1}){
+          P[i][j] += d;
+          double h = compute_m_height(construct_generator_matrix(P),m,false);
+          if(h < base){
+            base=h; improved=true;
+          } else {
+            P[i][j] -= d;
+          }
+        }
+        if(improved) break;
+      }
+    }
+}
+
+int main(){
+    const int n = 9, k = 5, m = 4;
+    const int nk = n - k;
     std::mt19937 rng(std::random_device{}());
 
-    int tries = 0;
+    // 1) Find a good circulant starting P0
     MatrixI P0;
-    double h0;
+    double   h0;
+    int tries = 0;
+    // do {
+    //     P0 = generate_broken_circulant_P2(k, nk, rng);
+    //     h0 = compute_m_height(
+    //         construct_generator_matrix(P0),
+    //         m,
+    //         /*debug=*/true
+    //     );
+    //     ++tries;
+    // } while (std::isinf(h0) || h0 > 100);  // only accept reasonably small
 
-    // keep drawing random P0 until its m-height is finite
-    do {
-    P0 = generate_circulate_P(k, nk, rng);
-    MatrixD G0 = construct_generator_matrix(P0);
-    h0 = compute_m_height(G0, m, /* debug = */ true);
-    ++tries;
-    std::cout << "m-height=" << h0 << "\n";
-    std::cout << vec_to_string(P0) << "\n";
-    } while (std::isinf(h0) || h0 > 350);
-
-    // report the first finite one
-    std::cout << "Found finite initial m-height=" << h0 
-            << " after " << tries << " tries\n";
-
-    // now run annealing from that P0
-    auto [P_best, h_best] = simulated_annealing_run(
-        P0, m, /*T0=*/50.0, /*alpha=*/0.9, /*iters=*/10, /*Tmin=*/1.0, /*debug=*/true
+    P0 = {
+        { -5,  4, -4,  3 },
+        { -3,  5, -1, -4 },
+        {  3,  2, -5, -8 },
+        {  4, -1, -3, -4 },
+        { -3,  3,  1, -3 }
+    };
+    h0 = compute_m_height(
+        construct_generator_matrix(P0),
+        m,
+        /*debug=*/true
     );
 
-    std::cout << "Best m-height = " << h_best << "\n";
+    std::cout << "Found initial finite m-height=" << h0
+              << " after " << tries << " tries\n";
+    std::cout << "P0 matrix:\n" << vec_to_string(P0) << "\n";
+
+    // 2) Run _num_runs_ parallel annealing chains and pick the best
+    int num_runs = omp_get_max_threads();
+    MatrixI bestP = P0;
+    double   bestH = h0;
+
+#pragma omp parallel
+    {
+        auto result = simulated_annealing_run(
+            P0,
+            m,
+            /*T0=*/50,
+            /*alpha=*/0.95,
+            /*iter_per_temp=*/30,
+            /*Tmin=*/1,
+            /*debug=*/true
+        );
+
+    #pragma omp critical
+        {
+            if (result.second < bestH) {
+                bestH = result.second;
+                bestP = result.first;
+            }
+        }
+    }
+
+    // 3) Print out final best
+    std::cout << "\n==== Final Best after SA ====\n";
+    std::cout << "Best m-height = " << bestH << "\n";
     std::cout << "P matrix:\n";
-    for (auto &row : P_best) {
-        for (int v : row) std::cout << v << ' ';
+    for (auto &row : bestP) {
+        for (int v : row) std::cout << v << " ";
         std::cout << "\n";
     }
 
+    // 3) Run local optimization
+    local_optimize(bestP, m);
+    bestH = compute_m_height(
+        construct_generator_matrix(bestP),
+        m,
+        /*debug=*/true
+    );
+    std::cout << "\n==== Final Best after local opt ====\n";
+    std::cout << "Best m-height = " << bestH << "\n";
+    std::cout << "P matrix:\n";
+    for (auto &row : bestP) {
+        for (int v : row) std::cout << v << " ";
+        std::cout << "\n";
+    }
+
+    // 4) Save to JSON
     std::ofstream ofs("results.json");
-    ofs << "{\n  \"mHeight\": " << h_best << ",\n  \"P\": [\n";
+    ofs << "{\n  \"mHeight\": " << bestH << ",\n  \"P\": [\n";
     for (int i = 0; i < k; ++i) {
         ofs << "    [";
         for (int j = 0; j < nk; ++j)
-            ofs << P_best[i][j] << (j+1<nk?", ":"");
-        ofs << "]" << (i+1<k?",":"") << "\n";
+            ofs << bestP[i][j] << (j+1< nk ? ", " : "");
+        ofs << "]" << (i+1<k ? "," : "") << "\n";
     }
-    ofs << "  ]\n}";
+    ofs << "  ]\n}\n";
 
-
-    // MatrixI P = {
-    //     {  4, -4, -3, -3,  1 },
-    //     {  4,  2,  2,  4, -1 },
-    //     {  1,  1,  3, -1,  2 },
-    //     { -3, -1, -4,  4, -5 },
-    //     { -3,  2, -2,  5,  2 }
-    // };
-    // MatrixD G = construct_generator_matrix(P);
-    // std::cout << "m-height = " << compute_m_height(G, 5, /* debug = */ true) << "\n";
-
+    return 0;
 }

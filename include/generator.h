@@ -1,11 +1,7 @@
-#ifndef GENERATOR_H
-#define GENERATOR_H
-
+#pragma once
 #include <vector>
 using MatrixI = std::vector<std::vector<int>>;
 using MatrixD = std::vector<std::vector<double>>;
 
-// Build G = [I_k | P]
+// build [ I_k | P ] from P
 MatrixD construct_generator_matrix(const MatrixI &P);
-
-#endif // GENERATOR_H
